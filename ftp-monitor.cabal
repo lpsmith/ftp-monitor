@@ -3,7 +3,8 @@ version:             0.1.0.0
 synopsis:            Monitor a ftp directory for changes,  and download files that are new or changed.
 description:         Please see README.md
 homepage:            https://github.com/lpsmith/ftp-monitor#readme
-license:             BSD3
+license:             AGPL-3
+license-file:        LICENSE
 author:              Leon P Smith
 maintainer:          leon@melding-monads.com
 copyright:           (c) 2016 Leon P Smith
