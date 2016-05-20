@@ -26,6 +26,7 @@ import System.Environment
 import System.Posix.Types(Fd(..))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.ByteString.Base16 as Base16
 import System.Exit
 import qualified Data.Char as Char
 import Database.SQLite.Simple (Connection)
@@ -92,12 +93,12 @@ downloadFile user pass uri dest
         || gzExitCode /= ExitSuccess   || shaExitCode /= ExitSuccess
      then fail "a subprocess failed"
      else do
-       hex_string <- B8.take 64 <$> B8.hGetLine sha_out
-       if    B8.length hex_string == 64
-          && B8.all Char.isHexDigit hex_string
+       hex_string <- B8.hGetLine sha_out
+       let (blob, _remainder) = Base16.decode hex_string
+       if B8.length blob == 32
        then do
          linkTmpFileFd tmpfd (dest </> (B8.unpack hex_string ++ ".gz"))
-         return hex_string
+         return blob
        else fail "failed to calculate sha256:  output not understood"
 
 
@@ -113,17 +114,13 @@ tee inh outh1 outh2 = loop
               B8.hPut outh2 bs
 --}
 
-
-
-
-
 createSchema :: DB.Connection -> IO ()
 createSchema conn = do
     DB.execute_ conn [sql|
         CREATE TABLE IF NOT EXISTS file_metadata (
             id                INTEGER PRIMARY KEY,
             filename          TEXT,
-            filehash          TEXT,
+            filehash          BLOB,
             hostname          TEXT,
             port              INT,
             username          TEXT,
