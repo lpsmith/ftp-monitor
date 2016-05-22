@@ -12,7 +12,7 @@
 module Main where
 
 import Control.Applicative
-import Control.Monad(void)
+import Control.Monad(void, forM_)
 import Control.Exception(throwIO)
 import TmpFile
 import Data.List (isSuffixOf)
@@ -21,18 +21,19 @@ import System.Process
 import System.FilePath
 import System.Environment
 -- import System.IO (Handle)
--- import qualified System.IO as IO
+import qualified System.IO as IO
 -- import System.Posix.IO(fdToHandle, handleToFd, closeFd)
 import System.Posix.Types(Fd(..))
-import Data.ByteString (ByteString)
+-- import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B8
-import qualified Data.ByteString.Base16 as Base16
+-- import qualified Data.ByteString.Base16 as Base16
 import System.Exit
-import qualified Data.Char as Char
+-- import qualified Data.Char as Char
 import Database.SQLite.Simple (Connection)
 import qualified Database.SQLite.Simple as DB
 import Database.SQLite.Simple.Types (Only(..))
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.ByteString.Lazy as BL
@@ -41,11 +42,24 @@ import LsParser
 import Data.Int(Int64)
 import Data.Time
 import Timestamp
+import Hash(Hash)
+import qualified Hash
+import CommandLine ( CommandLine(..)
+                   , CommandSpec(..)
+                   , FetchOptions(..)
+                   , LsOptions(..)
+                   , CatOptions(..)
+                   , execCommandLine
+                   )
+import Cas (CasHandle, withConn)
+import qualified Cas
+import qualified Segment
+import qualified System.IO.Streams as Streams
 
 showFd :: Fd -> String
 showFd (Fd fd) = show fd
 
-downloadFile :: String -> String -> String -> String -> IO ByteString
+downloadFile :: String -> String -> String -> String -> IO Hash
 downloadFile user pass uri dest
   | ".gz" `isSuffixOf` uri = do
 --     cwd  <- getCurrentDirectory
@@ -79,7 +93,6 @@ downloadFile user pass uri dest
                              std_in  = CreatePipe,
                              std_err = Inherit,
                              std_out = UseHandle tee_in
-
                           }
 --     tee curl_out tmph gz_in
 --     IO.hClose curl_out
@@ -93,13 +106,13 @@ downloadFile user pass uri dest
         || gzExitCode /= ExitSuccess   || shaExitCode /= ExitSuccess
      then fail "a subprocess failed"
      else do
-       hex_string <- B8.hGetLine sha_out
-       let (blob, _remainder) = Base16.decode hex_string
-       if B8.length blob == 32
-       then do
-         linkTmpFileFd tmpfd (dest </> (B8.unpack hex_string ++ ".gz"))
-         return blob
-       else fail "failed to calculate sha256:  output not understood"
+       hex_string <- B8.hGetContents sha_out
+       case Hash.mkSHA256Hash hex_string of
+         Just hash -> do
+            linkTmpFileFd tmpfd (dest </> (show hash ++ ".gz"))
+            return hash
+         Nothing -> do
+            fail "failed to calculate sha256:  output not understood"
 
 
 {--
@@ -144,6 +157,7 @@ createSchema conn = do
             fetch_finish_time INT
            )
       |]
+    DB.execute_ conn Segment.createTable
     return ()
 
 getFileData :: Connection -> T.Text -> IO (Maybe (LsTime, Int64))
@@ -180,26 +194,21 @@ downloadListing user pass uri = do
           then return lst
           else fail "curl failed"
 
-
-
-main :: IO ()
-main = do
-   -- TODO: replace this with something else?  
-   -- (optparse-applicative?  config files?)
+doFetch :: CasHandle -> FetchOptions -> IO ()
+doFetch cas_h _opts = do
    username      <- getEnv "FTPMON_USERNAME"
    password      <- getEnv "FTPMON_PASSWORD"
    hostname      <- getEnv "FTPMON_HOSTNAME"
    port :: Int   <- maybe 21 read     <$> lookupEnv "FTPMON_PORT"
-   rdns_hostname <- maybe hostname id <$> lookupEnv "FTPMON_RDNS_HOSTNAME" 
+   rdns_hostname <- maybe hostname id <$> lookupEnv "FTPMON_RDNS_HOSTNAME"
    path          <- maybe "/" id      <$> lookupEnv "FTPMON_FTP_PATH"
-   data_path     <- getEnv "FTPMON_DATA_PATH"   
    let base_uri = "ftp://" ++ rdns_hostname ++ ":" ++ show port ++ path
-   conn <- DB.open (data_path </> "metadata.sqlite")
-   createSchema conn
+   withConn cas_h createSchema
    fetch_start_time <- getCurrentTime
    listing_raw <- downloadListing username password base_uri
    fetch_end_time <- getCurrentTime
-   void $ DB.execute conn [sql|
+   withConn cas_h $ \conn -> do
+     void $ DB.execute conn [sql|
         INSERT INTO directory_listing_raw
                   ( path
                   , listing_raw
@@ -210,7 +219,7 @@ main = do
                   , fetch_start_time
                   , fetch_finish_time
                   ) VALUES (?,?,?,?,?,?,?,?)
-      |]          ( path
+       |]         ( path
                   , listing_raw
                   , hostname
                   , port
@@ -223,7 +232,7 @@ main = do
    let handleFile :: Entry -> IO ()
        handleFile Entry{..}
          | entry_type == File && T.isSuffixOf ".gz" entry_name = do
-           getFileData conn entry_name >>= \case
+           withConn cas_h (\conn -> getFileData conn entry_name) >>= \case
              Just (mtime, size)
                  |    (entry_mtime `equiv` mtime)
                    && (entry_size == size)
@@ -233,9 +242,9 @@ main = do
                filehash <-
                    downloadFile username password
                                 (base_uri ++ T.unpack entry_name)
-                                (data_path </> "cas")
+                                (maybe id (</>) (Cas.dataPath cas_h) "cas")
                fetch_finish_time <- getCurrentTime
-               DB.execute conn [sql|
+               withConn cas_h $ \conn -> DB.execute conn [sql|
                    INSERT INTO file_metadata
                              ( filename
                              , filehash
@@ -265,3 +274,65 @@ main = do
    case parseListing (utctDay fetch_end_time) listing_raw of
      Left err -> print err
      Right entries -> mapM_ handleFile entries
+
+doLs :: CasHandle -> LsOptions -> IO ()
+doLs cas_h _opts =
+    withConn cas_h $ \conn -> do
+      files <- DB.query_ conn [sql|
+                   SELECT DISTINCT filename FROM file_metadata
+                    ORDER BY filename
+                |]
+      forM_ files $ \(Only file) -> B8.putStrLn (TE.encodeUtf8 file)
+
+doCat :: CasHandle -> CatOptions -> IO ()
+doCat cas_h opts =
+    case cat_target opts of
+      Left filename -> catFilename filename
+      Right hash    -> catHash mkHashErrMsg hash
+  where
+    catFilename filename = do
+        withConn cas_h $ \conn -> do
+          hash_ <- DB.query conn [sql|
+             SELECT hash FROM file_metadata
+              WHERE filename = ?
+              ORDER BY fetch_fetch_time DESC
+              LIMIT 1
+            |] (Only filename)
+          case hash_ of
+            [] -> do
+              IO.hPutStrLn IO.stderr
+                   ("ftp-monitor: cannot access " ++ T.unpack filename
+                    ++ ": No such file")
+              exitFailure
+            (Only hash : _) ->
+              catHash (mkFileErrMsg filename) hash
+
+    catHash mkErrMsg hash = do
+        Cas.withContent cas_h hash $ \inS_ -> do
+            (inS, getHash') <- Hash.sha256stream inS_
+            Streams.connect inS Streams.stdout
+            hash' <- getHash'
+            if hash' == hash
+            then exitSuccess
+            else do
+              IO.hPutStrLn IO.stderr ("ftp-monitor: integrity check failure" ++ mkErrMsg hash hash')
+              exitFailure
+
+    mkFileErrMsg filename hash hash' =
+        "\n    file  " ++ T.unpack filename ++ mkHashErrMsg hash hash'
+
+    mkHashErrMsg hash hash' =
+        "\n    hash  " ++ show hash  ++
+        "\n    hash' " ++ show hash' ++
+        "\n"
+
+
+main :: IO ()
+main = do
+   cmdLine <- execCommandLine
+   data_path <- liftA2 (<|>) (pure (dataPath cmdLine)) (lookupEnv "FTPMON_DATA_PATH")
+   Cas.withCas data_path $ \cas_h ->
+     case commandSpec cmdLine of
+       Ls    opts -> doLs    cas_h opts
+       Cat   opts -> doCat   cas_h opts
+       Fetch opts -> doFetch cas_h opts
