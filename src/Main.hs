@@ -314,9 +314,9 @@ doCat cas_h opts =
     catFilename filename = do
         withConn cas_h $ \conn -> do
           hash_ <- DB.query conn [sql|
-             SELECT hash FROM file_metadata
+             SELECT filehash FROM file_metadata
               WHERE filename = ?
-              ORDER BY fetch_fetch_time DESC
+              ORDER BY fetch_finish_time DESC
               LIMIT 1
             |] (Only filename)
           case hash_ of

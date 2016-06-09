@@ -22,6 +22,7 @@ executable ftp-monitor
                        Cas
                        Hash
                        CommandLine
+                       Config
                        Segment
                        Util
   default-language:    Haskell2010
