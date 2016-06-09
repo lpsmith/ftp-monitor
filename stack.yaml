@@ -9,7 +9,7 @@ packages:
 - '.'
 - location:
     git: https://github.com/lpsmith/configurator-ng.git
-    commit: f36a0710443305466d18d7c9d281c8bda7ef8769
+    commit: 32d6c914d543435df4c1be2b8f758e75355f8687 
   extra-dep: true
 # Packages to be pulled from upstream that are not in the resolver (e.g., acme-missiles-0.3)
 extra-deps:
