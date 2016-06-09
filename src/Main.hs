@@ -37,6 +37,8 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Configurator as Config
+import qualified Data.Configurator.Parser as Config
 import SqlQQ
 import LsParser
 import Data.Int(Int64)
@@ -55,6 +57,7 @@ import Cas (CasHandle, withConn)
 import qualified Cas
 import qualified Segment
 import qualified System.IO.Streams as Streams
+import Config (FetchSource(..), parseFetchSources)
 
 showFd :: Fd -> String
 showFd (Fd fd) = show fd
@@ -195,14 +198,32 @@ downloadListing user pass uri = do
           else fail "curl failed"
 
 doFetch :: CasHandle -> FetchOptions -> IO ()
-doFetch cas_h _opts = do
-   username      <- getEnv "FTPMON_USERNAME"
-   password      <- getEnv "FTPMON_PASSWORD"
-   hostname      <- getEnv "FTPMON_HOSTNAME"
-   port :: Int   <- maybe 21 read     <$> lookupEnv "FTPMON_PORT"
-   rdns_hostname <- maybe hostname id <$> lookupEnv "FTPMON_RDNS_HOSTNAME"
-   path          <- maybe "/" id      <$> lookupEnv "FTPMON_FTP_PATH"
-   let base_uri = "ftp://" ++ rdns_hostname ++ ":" ++ show port ++ path
+doFetch cas_h opts = do
+   let path = maybe id (</>) (Cas.dataPath cas_h) "sources.config"
+   cc <- Config.load [Config.Required path]
+   conf <- Config.readConfig cc
+   case Config.runParserM parseFetchSources conf of
+     (Nothing, errs) -> do
+         putStr "Parse of sources.config failed:\n\n"
+         forM_ errs print
+     (Just sources, errs) -> do
+         let source_name = fetch_source opts
+         case lookup source_name sources of
+           Nothing -> do
+             putStr ("Source " ++ T.unpack source_name ++ " not found\n")
+           Just Nothing -> do
+             putStr ("Source " ++ T.unpack source_name ++ " parse error\n")
+             -- It might be nice to filter errs to be relevant only to the
+             -- subconfig in question.  On the one hand, configurator-ng
+             -- doesn't exactly support this cleanly.   On the other,
+             -- it doesn't seem that important (yet?) in this use case.
+             forM_ errs print
+           Just (Just source) -> do
+             doFetch2 cas_h opts source
+
+doFetch2 :: CasHandle -> FetchOptions -> FetchSource -> IO ()
+doFetch2 cas_h _opts FetchSource{..} = do
+   let base_uri = "ftp://" ++ rdns_hostname ++ ":" ++ show port ++ ftp_directory
    withConn cas_h createSchema
    fetch_start_time <- getCurrentTime
    listing_raw <- downloadListing username password base_uri
@@ -219,7 +240,7 @@ doFetch cas_h _opts = do
                   , fetch_start_time
                   , fetch_finish_time
                   ) VALUES (?,?,?,?,?,?,?,?)
-       |]         ( path
+       |]         ( ftp_directory
                   , listing_raw
                   , hostname
                   , port

@@ -2,13 +2,18 @@
 # For more information, see: http://docs.haskellstack.org/en/stable/yaml_configuration/
 
 # Specifies the GHC version and set of packages available (e.g., lts-3.5, nightly-2015-09-21, ghc-7.10.2)
-resolver: lts-5.15
+resolver: lts-5.17
 
 # Local packages, usually specified by relative directory name
 packages:
 - '.'
+- location:
+    git: https://github.com/lpsmith/configurator-ng.git
+    commit: f36a0710443305466d18d7c9d281c8bda7ef8769
+  extra-dep: true
 # Packages to be pulled from upstream that are not in the resolver (e.g., acme-missiles-0.3)
-extra-deps: []
+extra-deps:
+- critbit-0.2.0.0
 
 # Override default flag values for local packages and extra-deps
 flags: {}

@@ -29,6 +29,7 @@ executable ftp-monitor
                        attoparsec,
                        base16-bytestring,
                        bytestring,
+                       configurator-ng,
                        cryptonite,
                        directory,
                        filepath,
