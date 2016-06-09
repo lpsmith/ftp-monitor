@@ -22,6 +22,7 @@ import System.FilePath
 import System.Environment
 -- import System.IO (Handle)
 import qualified System.IO as IO
+import           System.IO.Error (isAlreadyExistsError)
 -- import System.Posix.IO(fdToHandle, handleToFd, closeFd)
 import System.Posix.Types(Fd(..))
 -- import Data.ByteString (ByteString)
@@ -58,6 +59,7 @@ import qualified Cas
 import qualified Segment
 import qualified System.IO.Streams as Streams
 import Config (FetchSource(..), parseFetchSources)
+import Util (ignoreError)
 
 showFd :: Fd -> String
 showFd (Fd fd) = show fd
@@ -112,11 +114,11 @@ downloadFile user pass uri dest
        hex_string <- B8.hGetContents sha_out
        case Hash.mkSHA256Hash hex_string of
          Just hash -> do
-            linkTmpFileFd tmpfd (dest </> (show hash ++ ".gz"))
-            return hash
+             ignoreError isAlreadyExistsError $ do
+                 linkTmpFileFd tmpfd (dest </> (show hash ++ ".gz"))
+             return hash
          Nothing -> do
-            fail "failed to calculate sha256:  output not understood"
-
+             fail "failed to calculate sha256:  output not understood"
 
 {--
 tee :: Handle -> Handle -> Handle -> IO ()
@@ -204,20 +206,25 @@ doFetch cas_h opts = do
    conf <- Config.readConfig cc
    case Config.runParserM parseFetchSources conf of
      (Nothing, errs) -> do
-         putStr "Parse of sources.config failed:\n\n"
-         forM_ errs print
+         IO.hPutStr IO.stderr "Parse of sources.config failed:\n\n"
+         forM_ errs (IO.hPrint IO.stderr)
+         exitFailure
      (Just sources, errs) -> do
          let source_name = fetch_source opts
          case lookup source_name sources of
            Nothing -> do
-             putStr ("Source " ++ T.unpack source_name ++ " not found\n")
+             IO.hPutStr IO.stderr
+                   ("Source " ++ T.unpack source_name ++ " not found\n")
+             exitFailure
            Just Nothing -> do
-             putStr ("Source " ++ T.unpack source_name ++ " parse error\n")
+             IO.hPutStr IO.stderr
+                   ("Source " ++ T.unpack source_name ++ " parse error\n")
              -- It might be nice to filter errs to be relevant only to the
              -- subconfig in question.  On the one hand, configurator-ng
              -- doesn't exactly support this cleanly.   On the other,
              -- it doesn't seem that important (yet?) in this use case.
-             forM_ errs print
+             forM_ errs (IO.hPrint IO.stderr)
+             exitFailure
            Just (Just source) -> do
              doFetch2 cas_h opts source
 
@@ -293,7 +300,9 @@ doFetch2 cas_h _opts FetchSource{..} = do
          | otherwise = return ()
 
    case parseListing (utctDay fetch_end_time) listing_raw of
-     Left err -> print err
+     Left err -> do
+         IO.hPrint IO.stderr err
+         exitFailure
      Right entries -> mapM_ handleFile entries
 
 doLs :: CasHandle -> LsOptions -> IO ()

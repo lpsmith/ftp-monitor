@@ -10,6 +10,7 @@
 
 module Util where
 
+import           Control.Exception
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import           Data.Int
@@ -35,3 +36,10 @@ dropBytes len_ inS
                                  else do
                                    loop (n - fromIntegral (B.length str))
             in loop len
+
+ignoreError :: Exception e => (e -> Bool) -> IO () -> IO ()
+ignoreError p = handle $ \err ->
+                  if p err
+                  then return ()
+                  else throwIO err
+{-# INLINE ignoreError #-}
